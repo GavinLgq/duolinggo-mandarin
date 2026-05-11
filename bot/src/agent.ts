@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "./config.js";
 import { appendMessage, ensureUser, recentMessages } from "./db.js";
-import { runTool, toolDefinitions } from "./tools.js";
+import { type SideEffect, runTool, toolDefinitions } from "./tools.js";
 
 const client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
 
@@ -22,10 +22,12 @@ Bahasa default percakapan: campuran Indonesia + Mandarin. Jangan pakai bahasa In
 
 type Msg = Anthropic.MessageParam;
 
+export type AgentResult = { text: string; sideEffects: SideEffect[] };
+
 export async function runAgent(
   discordId: string,
   userMessage: string,
-): Promise<string> {
+): Promise<AgentResult> {
   ensureUser(discordId);
   appendMessage(discordId, "user", userMessage);
 
@@ -35,6 +37,7 @@ export async function runAgent(
     content: m.content,
   }));
 
+  const sideEffects: SideEffect[] = [];
   let finalText = "";
 
   for (let step = 0; step < 5; step++) {
@@ -58,10 +61,11 @@ export async function runAgent(
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
       for (const block of response.content) {
         if (block.type === "tool_use") {
-          const result = runTool(
+          const result = await runTool(
             block.name,
             block.input as Record<string, unknown>,
             discordId,
+            sideEffects,
           );
           toolResults.push({
             type: "tool_result",
@@ -84,5 +88,5 @@ export async function runAgent(
 
   if (!finalText) finalText = "_(maaf, aku bingung jawabnya — coba ulangi?)_";
   appendMessage(discordId, "assistant", finalText);
-  return finalText;
+  return { text: finalText, sideEffects };
 }

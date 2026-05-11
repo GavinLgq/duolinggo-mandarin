@@ -1,18 +1,20 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import { getStreak, recordPractice } from "./db.js";
+import { getStreak, getUser, recordPractice, saveQuiz } from "./db.js";
+import { generateQuiz } from "./quiz.js";
+
+export type SideEffect = { type: "quiz"; quizId: number };
 
 export const toolDefinitions: Anthropic.Tool[] = [
   {
     name: "record_practice",
     description:
-      "Record that the user practiced today. Call this AT MOST ONCE per response, only when the user has produced Mandarin (hanzi or pinyin) or genuinely engaged with a tutoring exchange. Do not call for greetings or off-topic chatter.",
+      "Record that the user practiced today. Call AT MOST ONCE per response, only when the user produced Mandarin or genuinely engaged with tutoring. Skip for greetings/off-topic.",
     input_schema: {
       type: "object",
       properties: {
         summary: {
           type: "string",
-          description:
-            "One short sentence describing what was practiced (e.g., 'Greetings + self-introduction at HSK1 level').",
+          description: "One short sentence describing what was practiced.",
         },
       },
       required: ["summary"],
@@ -21,16 +23,32 @@ export const toolDefinitions: Anthropic.Tool[] = [
   {
     name: "get_streak",
     description:
-      "Get the user's current daily streak, total practice sessions, and last practiced date. Use when the user asks about progress, streak, or stats.",
+      "Get the user's current daily streak and total sessions. Use when asked about progress.",
     input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "start_quiz",
+    description:
+      "Generate a multiple-choice quiz at the user's current HSK level. Use when the user says they want a quiz, asks to test themselves, or when it naturally fits the tutoring flow. The quiz will be posted as a separate Discord message with reaction buttons — your text reply should briefly announce it.",
+    input_schema: {
+      type: "object",
+      properties: {
+        topic_hint: {
+          type: "string",
+          description:
+            "Optional focus area, e.g., 'greetings', 'numbers', 'food vocabulary'.",
+        },
+      },
+    },
   },
 ];
 
-export function runTool(
+export async function runTool(
   name: string,
   input: Record<string, unknown>,
   discordId: string,
-): string {
+  sideEffects: SideEffect[],
+): Promise<string> {
   switch (name) {
     case "record_practice": {
       const summary = String(input.summary ?? "").slice(0, 200);
@@ -42,8 +60,28 @@ export function runTool(
         totalSessions: s.totalSessions,
       });
     }
-    case "get_streak": {
+    case "get_streak":
       return JSON.stringify(getStreak(discordId));
+    case "start_quiz": {
+      const user = getUser(discordId);
+      const level = user?.hsk_level ?? 1;
+      const hint =
+        typeof input.topic_hint === "string" ? input.topic_hint : undefined;
+      try {
+        const spec = await generateQuiz(level, hint);
+        const quizId = saveQuiz(discordId, spec);
+        sideEffects.push({ type: "quiz", quizId });
+        return JSON.stringify({
+          ok: true,
+          message:
+            "Quiz prepared. It will be posted as a separate message after your reply.",
+        });
+      } catch (err) {
+        return JSON.stringify({
+          ok: false,
+          error: err instanceof Error ? err.message : "quiz generation failed",
+        });
+      }
     }
     default:
       return JSON.stringify({ error: `unknown tool: ${name}` });

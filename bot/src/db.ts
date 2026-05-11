@@ -13,6 +13,9 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     discord_id TEXT PRIMARY KEY,
     hsk_level INTEGER NOT NULL DEFAULT 1,
+    reminder_enabled INTEGER NOT NULL DEFAULT 1,
+    reminder_hour INTEGER NOT NULL DEFAULT 19,
+    timezone_offset INTEGER NOT NULL DEFAULT 7,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -35,7 +38,34 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_messages_user_time
     ON messages(discord_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS quizzes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    discord_id TEXT NOT NULL REFERENCES users(discord_id) ON DELETE CASCADE,
+    question TEXT NOT NULL,
+    options TEXT NOT NULL,
+    correct_index INTEGER NOT NULL,
+    explanation TEXT,
+    message_id TEXT,
+    answered_at TEXT,
+    was_correct INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_quizzes_message ON quizzes(message_id);
+  CREATE INDEX IF NOT EXISTS idx_quizzes_user ON quizzes(discord_id);
 `);
+
+for (const sql of [
+  "ALTER TABLE users ADD COLUMN reminder_enabled INTEGER NOT NULL DEFAULT 1",
+  "ALTER TABLE users ADD COLUMN reminder_hour INTEGER NOT NULL DEFAULT 19",
+  "ALTER TABLE users ADD COLUMN timezone_offset INTEGER NOT NULL DEFAULT 7",
+]) {
+  try {
+    db.exec(sql);
+  } catch {
+    // column already exists
+  }
+}
 
 export function ensureUser(discordId: string): void {
   db.prepare("INSERT OR IGNORE INTO users(discord_id) VALUES (?)").run(discordId);
@@ -82,6 +112,105 @@ export function recordPractice(discordId: string, summary: string): void {
       `INSERT INTO sessions(discord_id, messages, summary) VALUES (?, 1, ?)`,
     ).run(discordId, summary);
   }
+}
+
+export type UserPrefs = {
+  discord_id: string;
+  hsk_level: number;
+  reminder_enabled: number;
+  reminder_hour: number;
+  timezone_offset: number;
+};
+
+export function getUser(discordId: string): UserPrefs | undefined {
+  return db
+    .prepare(`SELECT * FROM users WHERE discord_id = ?`)
+    .get(discordId) as UserPrefs | undefined;
+}
+
+export function setHskLevel(discordId: string, level: number): void {
+  ensureUser(discordId);
+  db.prepare(`UPDATE users SET hsk_level = ? WHERE discord_id = ?`).run(
+    level,
+    discordId,
+  );
+}
+
+export function setReminder(discordId: string, enabled: boolean): void {
+  ensureUser(discordId);
+  db.prepare(`UPDATE users SET reminder_enabled = ? WHERE discord_id = ?`).run(
+    enabled ? 1 : 0,
+    discordId,
+  );
+}
+
+export type QuizSpec = {
+  question: string;
+  options: string[];
+  correctIndex: number;
+  explanation: string;
+};
+
+export function saveQuiz(discordId: string, q: QuizSpec): number {
+  const info = db
+    .prepare(
+      `INSERT INTO quizzes(discord_id, question, options, correct_index, explanation)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(
+      discordId,
+      q.question,
+      JSON.stringify(q.options),
+      q.correctIndex,
+      q.explanation,
+    );
+  return info.lastInsertRowid as number;
+}
+
+export function attachQuizMessage(quizId: number, messageId: string): void {
+  db.prepare(`UPDATE quizzes SET message_id = ? WHERE id = ?`).run(
+    messageId,
+    quizId,
+  );
+}
+
+export type QuizRow = {
+  id: number;
+  discord_id: string;
+  question: string;
+  options: string;
+  correct_index: number;
+  explanation: string | null;
+  message_id: string | null;
+  answered_at: string | null;
+  was_correct: number | null;
+};
+
+export function getQuizByMessage(messageId: string): QuizRow | undefined {
+  return db
+    .prepare(`SELECT * FROM quizzes WHERE message_id = ?`)
+    .get(messageId) as QuizRow | undefined;
+}
+
+export function answerQuiz(quizId: number, wasCorrect: boolean): void {
+  db.prepare(
+    `UPDATE quizzes SET answered_at = datetime('now'), was_correct = ? WHERE id = ?`,
+  ).run(wasCorrect ? 1 : 0, quizId);
+}
+
+export function usersDueForReminder(currentUtcHour: number): UserPrefs[] {
+  return db
+    .prepare(
+      `SELECT * FROM users
+       WHERE reminder_enabled = 1
+         AND ((reminder_hour - timezone_offset) % 24 + 24) % 24 = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM sessions
+           WHERE sessions.discord_id = users.discord_id
+             AND sessions.practiced_on = date('now')
+         )`,
+    )
+    .all(currentUtcHour) as UserPrefs[];
 }
 
 export function getStreak(discordId: string): {
